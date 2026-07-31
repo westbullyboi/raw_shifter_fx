@@ -1,0 +1,153 @@
+name: Build
+
+on:
+  push:
+    branches: [main, "claude/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  dsp-tests:
+    name: DSP unit tests (no JUCE)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure
+        run: cmake -S . -B build-tests -DSHIFTERFX_BUILD_PLUGIN=OFF -DSHIFTERFX_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-tests --config Release --parallel
+
+      - name: Run tests
+        run: ./build-tests/Tests/ShifterFX_Tests
+
+  build-plugin:
+    name: Build VST3 (${{ matrix.os }})
+    needs: dsp-tests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: ShifterFX-Linux-VST3
+            extra_cmake_args: ""
+          - os: macos-latest
+            artifact_name: ShifterFX-macOS-VST3
+            # GitHub's macos-latest runner is Apple Silicon (arm64) only. Without this, the
+            # plugin is arm64-only and crashes/fails to load in any host process running as
+            # x86_64 (e.g. FL Studio under Rosetta 2, or a genuine Intel Mac) - building both
+            # slices makes the same binary work natively either way.
+            extra_cmake_args: -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+          - os: windows-latest
+            artifact_name: ShifterFX-Windows-VST3
+            extra_cmake_args: ""
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Linux plugin-host dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev \
+            libasound2-dev libfreetype-dev libfontconfig1-dev \
+            libcurl4-openssl-dev libgl1-mesa-dev
+
+      - name: Cache JUCE checkout
+        uses: actions/cache@v5
+        with:
+          path: build/_deps/juce-src
+          key: juce-8.0.4-${{ runner.os }}
+
+      - name: Configure
+        run: cmake -S . -B build -DSHIFTERFX_BUILD_PLUGIN=ON -DSHIFTERFX_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release ${{ matrix.extra_cmake_args }}
+
+      - name: Build VST3
+        run: cmake --build build --config Release --target ShifterFX_VST3 --parallel
+
+      # AU (Audio Unit) only builds on Apple platforms, so this is macOS-only. FL Studio,
+      # Logic Pro, GarageBand, and MainStage all load AU on Mac.
+      - name: Build AU
+        if: runner.os == 'macOS'
+        run: cmake --build build --config Release --target ShifterFX_AU --parallel
+
+      - name: Inspect built bundle structure (diagnostic)
+        shell: bash
+        run: |
+          echo "--- VST3 ---"
+          find "build/ShifterFX_artefacts/Release/VST3/RAW SHIFTER FX.vst3" -maxdepth 3
+          file "build/ShifterFX_artefacts/Release/VST3/RAW SHIFTER FX.vst3" || true
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            echo "--- AU ---"
+            find "build/ShifterFX_artefacts/Release/AU/RAW SHIFTER FX.component" -maxdepth 3
+            file "build/ShifterFX_artefacts/Release/AU/RAW SHIFTER FX.component" || true
+            echo "--- Architectures (must include both x86_64 and arm64) ---"
+            lipo -info "build/ShifterFX_artefacts/Release/VST3/RAW SHIFTER FX.vst3/Contents/MacOS/RAW SHIFTER FX"
+            lipo -info "build/ShifterFX_artefacts/Release/AU/RAW SHIFTER FX.component/Contents/MacOS/RAW SHIFTER FX"
+          fi
+
+      # Plugins downloaded via a browser get a com.apple.quarantine flag, and macOS Gatekeeper
+      # silently drops unsigned bundles during a host's plugin scan (no error - they just never
+      # show up). A real Developer ID + notarization needs Apple credentials we don't have in
+      # CI, but an ad-hoc signature (no certificate required) is enough to satisfy the AU
+      # validation JUCE hosts rely on and reduces Gatekeeper friction. Users still need to clear
+      # the quarantine flag after downloading - see README.
+      - name: Ad-hoc code sign plugin bundles
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --deep --sign - "build/ShifterFX_artefacts/Release/VST3/RAW SHIFTER FX.vst3"
+          codesign --force --deep --sign - "build/ShifterFX_artefacts/Release/AU/RAW SHIFTER FX.component"
+          codesign --verify --deep --strict --verbose=2 "build/ShifterFX_artefacts/Release/VST3/RAW SHIFTER FX.vst3"
+          codesign --verify --deep --strict --verbose=2 "build/ShifterFX_artefacts/Release/AU/RAW SHIFTER FX.component"
+
+      # macOS gets special handling: instead of handing upload-artifact the raw bundle
+      # directory, we zip it ourselves with `ditto` - Apple's own recommended tool for
+      # packaging a signed .vst3/.component bundle. GitHub's own artifact zip drops the
+      # executable permission bit and symlinks, which is exactly the corruption that makes a
+      # host (or Finder) see a loose Mach-O binary instead of a recognised plugin bundle after
+      # download+unzip. This costs macOS users one extra unzip step (GitHub always wraps
+      # artifact downloads in its own outer zip, so this is a zip-of-a-zip) - see README.
+      - name: Package macOS bundles with ditto
+        if: runner.os == 'macOS'
+        run: |
+          ditto -c -k --keepParent "build/ShifterFX_artefacts/Release/VST3/RAW SHIFTER FX.vst3" "ShifterFX-macOS-VST3.zip"
+          ditto -c -k --keepParent "build/ShifterFX_artefacts/Release/AU/RAW SHIFTER FX.component" "ShifterFX-macOS-AU.zip"
+          echo "--- inner zip contents (must start with 'RAW SHIFTER FX.vst3' / '.component') ---"
+          unzip -l "ShifterFX-macOS-VST3.zip" | head -12
+          unzip -l "ShifterFX-macOS-AU.zip" | head -12
+
+      # Linux/Windows upload the bundle directory as-is (no permission bits to lose), but it
+      # MUST be staged into a wrapper folder first. upload-artifact sets the artifact root to
+      # whatever single directory it is handed, so pointing it straight at
+      # "RAW SHIFTER FX.vst3" uploads that bundle's *contents* and silently drops the ".vst3"
+      # folder name itself - the download then unzips to a bare "Contents/" directory that no
+      # DAW recognises as a plugin. Handing it the staging folder instead makes
+      # "RAW SHIFTER FX.vst3/..." the path inside the artifact, which is what users actually
+      # need to drop into their VST3 folder.
+      - name: Stage VST3 bundle for upload
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          rm -rf upload-staging
+          mkdir -p upload-staging
+          cp -R "build/ShifterFX_artefacts/Release/VST3/RAW SHIFTER FX.vst3" upload-staging/
+          echo "--- exact tree that will be uploaded (must start with 'RAW SHIFTER FX.vst3') ---"
+          find upload-staging
+
+      - name: Upload VST3 artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ runner.os == 'macOS' && format('{0}.zip', matrix.artifact_name) || 'upload-staging' }}
+          if-no-files-found: error
+
+      - name: Upload AU artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ShifterFX-macOS-AU
+          path: ShifterFX-macOS-AU.zip
+          if-no-files-found: error
