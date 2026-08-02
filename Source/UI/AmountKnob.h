@@ -21,7 +21,7 @@ namespace shifterfx::ui
 
         void paint(juce::Graphics& g) override
         {
-            const auto bounds = getLocalBounds().toFloat();
+            auto bounds = getLocalBounds().toFloat();
             const auto dial = bounds.removeFromTop(bounds.getWidth()).reduced(6.0f);
 
             g.setColour(Theme::panel);
