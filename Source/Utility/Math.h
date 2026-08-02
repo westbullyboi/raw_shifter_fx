@@ -42,6 +42,19 @@ namespace shifterfx::util
         return std::pow(10.0, db / 20.0);
     }
 
+    /// Interpolates between two frequencies (Hz) *logarithmically* rather than linearly: pitch
+    /// and filter cutoff are perceived on a log scale, so a plain `lerp(startHz, endHz, t)`
+    /// between e.g. 18 kHz and 250 Hz barely sounds different from the open end until `t` is
+    /// most of the way to 1 - the low end of that range is a tiny fraction of the raw Hz span
+    /// but a large fraction of the perceived pitch/brightness change. This is the correct
+    /// interpolation for any user-facing frequency sweep/knob.
+    [[nodiscard]] inline float lerpLogFrequency(float startHz, float endHz, float t) noexcept
+    {
+        const float a = std::max(startHz, 1.0f);
+        const float b = std::max(endHz, 1.0f);
+        return a * std::pow(b / a, clamp(t, 0.0f, 1.0f));
+    }
+
     /// Equal-power (constant loudness across a linear crossfade) gain pair for position
     /// `t` in [0, 1]: 0 = fully A, 1 = fully B. gainA^2 + gainB^2 == 1 for every t.
     inline void equalPowerGains(float t, float& gainA, float& gainB) noexcept

@@ -120,10 +120,16 @@ namespace shifterfx::dsp
             const float stepPhase = currentStepLenSamples > 0
                                        ? static_cast<float>(positionInStep) / static_cast<float>(currentStepLenSamples)
                                        : 0.0f;
-            const float filterFloorHz = util::lerp(constants::kFilterOpenHz, constants::kFilterMinHz,
-                                                     laneAmount[static_cast<std::size_t>(constants::Lane::Filter)]);
-            const float targetCutoffHz = filterArmed ? util::lerp(constants::kFilterOpenHz, filterFloorHz, stepPhase)
-                                                       : constants::kFilterOpenHz;
+            // Both the Amount->floor mapping and the phase->sweep within the step must move in
+            // log-frequency space, not linear Hz: a linear lerp from 18kHz down to a low floor
+            // spends almost the whole range sounding like "still basically open" to the ear,
+            // which is why the Filter lane read as weak at moderate Amount/step-phase settings.
+            const float filterFloorHz = util::lerpLogFrequency(
+                constants::kFilterOpenHz, constants::kFilterMinHz,
+                laneAmount[static_cast<std::size_t>(constants::Lane::Filter)]);
+            const float targetCutoffHz = filterArmed
+                                            ? util::lerpLogFrequency(constants::kFilterOpenHz, filterFloorHz, stepPhase)
+                                            : constants::kFilterOpenHz;
             const float filterQ = util::lerp(constants::kFilterMinQ, constants::kFilterMaxQ,
                                               laneAmount[static_cast<std::size_t>(constants::Lane::Filter)]);
 
@@ -139,7 +145,11 @@ namespace shifterfx::dsp
             const auto echoDelaySamples = std::clamp<std::int64_t>(
                 static_cast<std::int64_t>(std::llround(currentStepLenSamples * constants::kEchoDelayStepFraction)), 1,
                 static_cast<std::int64_t>(worstCaseStepLenSamples));
-            const float echoFeedback = laneAmount[static_cast<std::size_t>(constants::Lane::Echo)]
+            // Feedback decay is exponential in repeat count, so a linear Amount->feedback mapping
+            // spends most of its lower range decaying below audibility within a step or two; a
+            // sqrt curve front-loads the useful range so mid-range Amount already yields a tail
+            // that survives several repeats.
+            const float echoFeedback = std::sqrt(laneAmount[static_cast<std::size_t>(constants::Lane::Echo)])
                                         * constants::kEchoMaxFeedback;
 
             std::array<float, constants::kNumChannels> wetChannel {};

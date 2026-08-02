@@ -54,9 +54,13 @@ namespace shifterfx
             {
                 const auto id = amountParamID(lane);
                 const auto name = juce::String(constants::kLaneNames[static_cast<std::size_t>(lane)]) + " Amount";
+                // 65% rather than the range's midpoint: with the log-frequency Filter sweep and
+                // dB-based Gate curve now in place, 65% already reads as a clearly audible
+                // effect out of the box, matching the goal of a freshly-armed step doing
+                // something obviously audible rather than a token nudge.
                 params.push_back(std::make_unique<juce::AudioParameterFloat>(
                     juce::ParameterID { id, 1 }, name,
-                    juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 50.0f,
+                    juce::NormalisableRange<float> { 0.0f, 100.0f, 0.1f }, 65.0f,
                     juce::AudioParameterFloatAttributes {}.withLabel("%")));
             }
         }

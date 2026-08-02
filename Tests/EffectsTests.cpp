@@ -9,8 +9,28 @@
 #include "../Source/DSP/PanLaw.h"
 #include "../Source/DSP/StepFilter.h"
 #include "../Source/DSP/StepRemap.h"
+#include "../Source/Utility/Math.h"
 
+using namespace shifterfx;
 using namespace shifterfx::dsp;
+
+// --- Math::lerpLogFrequency ----------------------------------------------------------------
+
+TEST_CASE("lerpLogFrequency reaches the geometric mean at t=0.5, not the linear midpoint")
+{
+    // 18000 Hz -> 250 Hz linearly interpolated lands at 9125 Hz - barely perceptibly different
+    // from the open end. The correct (perceptual) midpoint is the geometric mean, sqrt(18000*250)
+    // ~= 2121 Hz, which is what makes the Filter lane's sweep actually read as audible by 50%.
+    const float mid = util::lerpLogFrequency(18000.0f, 250.0f, 0.5f);
+    EXPECT_NEAR(mid, std::sqrt(18000.0f * 250.0f), 1.0);
+    EXPECT_TRUE(mid < 9125.0f - 1000.0f);
+}
+
+TEST_CASE("lerpLogFrequency returns the endpoints at t=0 and t=1")
+{
+    EXPECT_NEAR(util::lerpLogFrequency(18000.0f, 250.0f, 0.0f), 18000.0f, 0.5);
+    EXPECT_NEAR(util::lerpLogFrequency(18000.0f, 250.0f, 1.0f), 250.0f, 0.5);
+}
 
 // --- StepRemap ---------------------------------------------------------------------------
 
@@ -58,10 +78,21 @@ TEST_CASE("GateEnvelope gain is fully open at duckAmount 0")
     EXPECT_NEAR(gate::computeGain(500, 1000, 50, 0.0f), 1.0f, 1e-6);
 }
 
-TEST_CASE("GateEnvelope reaches full duck away from the step edges")
+TEST_CASE("GateEnvelope reaches near-silent duck away from the step edges")
 {
+    // duckAmount 1.0 maps to -kMaxDuckDb (40 dB) rather than exact -infinity/0.0 linear gain -
+    // a dB-based curve so mid-range Amount settings are already clearly audible as gating,
+    // instead of a linear "1 - duckAmount" mapping that only reaches -6 dB at the midpoint.
     const float gain = gate::computeGain(500, 1000, 50, 1.0f);
-    EXPECT_NEAR(gain, 0.0f, 1e-4);
+    EXPECT_NEAR(gain, 0.01f, 1e-3);
+}
+
+TEST_CASE("GateEnvelope duck curve is steeper than a linear mapping at mid Amount")
+{
+    // At 50% Amount the dB-based curve must already be well past a linear -6 dB (~0.5 gain) -
+    // this is the whole point of the fix: mid-range settings should read as clearly gated.
+    const float gain = gate::computeGain(500, 1000, 50, 0.5f);
+    EXPECT_TRUE(gain < 0.15f);
 }
 
 TEST_CASE("GateEnvelope is open exactly at the step edges regardless of duck amount")

@@ -5,24 +5,38 @@
 #include <cstdint>
 #include <numbers>
 
+#include "../Utility/Math.h"
+
 namespace shifterfx::dsp
 {
     /**
      * GateEnvelope - pure function computing the Gate lane's per-sample gain.
      *
-     * An armed step ducks towards `1 - duckAmount01` with a short
-     * raised-cosine ramp at both the start and end of the step, so full
-     * mute (duckAmount01 = 1) never clicks. Not a stateful class: the gain
-     * at any sample is a pure function of where that sample sits within
-     * its step, so it can be evaluated directly from ShifterEngine's
-     * existing step-position counter with no extra state to keep in sync.
+     * An armed step ducks towards a sustain gain, with a short raised-
+     * cosine ramp at both the start and end of the step so full mute
+     * (duckAmount01 = 1) never clicks. Not a stateful class: the gain at
+     * any sample is a pure function of where that sample sits within its
+     * step, so it can be evaluated directly from ShifterEngine's existing
+     * step-position counter with no extra state to keep in sync.
+     *
+     * The sustain gain is mapped through decibels rather than linear
+     * amplitude (sustain = 10^(-duckAmount01 * kMaxDuckDb / 20)): ears
+     * hear loudness roughly logarithmically, so a linear `1 - duckAmount01`
+     * mapping only reaches -6 dB at the halfway knob position - audible as
+     * "a bit quieter" rather than an actual gate. The dB mapping reaches
+     * -20 dB by the midpoint and effective silence by full Amount.
      */
     namespace gate
     {
+        inline constexpr float kMaxDuckDb = 40.0f;
+
         [[nodiscard]] inline float computeGain(std::int64_t positionInStep, std::int64_t stepLenSamples,
                                                  std::int64_t rampSamples, float duckAmount01) noexcept
         {
-            const float sustain = 1.0f - std::clamp(duckAmount01, 0.0f, 1.0f);
+            const float duck = std::clamp(duckAmount01, 0.0f, 1.0f);
+            const float sustain = duck > 0.0f
+                                     ? static_cast<float>(util::decibelsToGain(-duck * kMaxDuckDb))
+                                     : 1.0f;
             if (stepLenSamples <= 0)
                 return sustain;
 
